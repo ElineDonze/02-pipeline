@@ -8,6 +8,8 @@ import util.structure as structure
 import util.file_access_utilities as futil
 
 
+
+
 def collect_image_paths(data_dir):
     image_keys = [structure.BrainImageTypes.T1w,
                   structure.BrainImageTypes.GroundTruth]
@@ -26,16 +28,28 @@ def collect_image_paths(data_dir):
     dir_filter = futil.DataDirectoryFilter()
 
     # todo: create an instance of futil.FileSystemDataCrawler and pass the correpsonding arguments
-    crawler = None  # todo: modify here
+    crawler = futil.FileSystemDataCrawler(data_dir, image_keys, MyFilePathGenerator(), dir_filter, '.nii.gz') # todo: modify here
+    #image_keys (line 12) tells which images to look for (T1w and GroundTruth)
+    #file_path_generator turns the image key into the corresponding file name (T1native and labels_native)
+    #dir_filter chooses which subfolders to keep 
+    #'.nii.gz' is the file extension of the images
 
     return crawler
 
 
 def load_images(image_paths):
     # todo: read the images (T1 as sitk.sitkFloat32, GroundTruth as sitk.sitkUInt8)
+    #T1 as sitkFloat32: the T1 holds MR intensity values. 
+    # The later steps (registration, rescaling to −3…101, the median filter) do calculations that need decimal precision, 
+    # and the registration metric expects float images.
+    #GroundTruth as sitkUInt8: this is a label map where each voxel is a class number (0–5). 
+    # Labels must stay whole numbers, and UInt8 (0–255) is enough to hold them.
     image_dict = {
-        structure.BrainImageTypes.T1w: None,  # todo: modify here
-        structure.BrainImageTypes.GroundTruth: None  # todo: modify here
+        structure.BrainImageTypes.T1w: sitk.ReadImage(image_paths[structure.BrainImageTypes.T1w], sitk.sitkFloat32),  # todo: modify here
+        structure.BrainImageTypes.GroundTruth: sitk.ReadImage(image_paths[structure.BrainImageTypes.GroundTruth], sitk.sitkUInt8)  # todo: modify here
+        # image_paths[structure.BrainImageTypes.T1w] is just the path string to the T1 file
+        # sitk.ReadImage(path, pixel_type) loads the .nii.gz file into an sitk.Image and converts its voxels to the pixel type you give it.
+        # Keep the same keys. The returned dict uses the same BrainImageTypes keys. Later functions such as register_images look up image_dict[structure.BrainImageTypes.GroundTruth], so the keys must match.
     }
 
     return image_dict
@@ -46,14 +60,19 @@ def register_images(image_dict, atlas_img):
     registration = fltr_reg.MultiModalRegistration()
     registration_params = fltr_reg.MultiModalRegistrationParams(atlas_img)
     # todo execute the registration with the T1-weighted image and the registration parameters
-    registered_t1 = None  # todo: modify here
+    registered_t1 = registration.execute(image_dict[structure.BrainImageTypes.T1w], registration_params)  # todo: modify here
+    # registration.execute is a pymia filter and returns the T1 resampled into atlas space
+
 
     gt_img = image_dict[structure.BrainImageTypes.GroundTruth]
     # todo: apply transform to GroundTruth image (gt_img)
     #  (hint: sitk.Resample, referenceImage=atlas_img, transform=tegistration.transform,
     #  interpolator=sitk.sitkNearestNeighbor
-    registered_gt = None  # todo: modify here
+    registered_gt = sitk.Resample(gt_img, atlas_img, registration.transform, sitk.sitkNearestNeighbor)  # todo: modify here
 
+    #What registration does. Each subject's brain is scanned in a different position, at a different size and orientation. 
+    # Registration finds a spatial transform that aligns the subject's T1 with the atlas, a standard reference brain (MNI152). 
+    # After registration, every subject lives in the same coordinate space and has the same image size, 197×233×189. 
     return registered_t1, registered_gt
 
 
@@ -70,9 +89,12 @@ def preprocess_filter_rescale_t1(image_dict, new_min_val, new_max_val):
             return resacaled_img
 
     # todo: use the above filter and parameters to get the rescaled T1-weighted image
-    filter = None # todo: modify here
-    filter_params = None  # todo: modify here
-    minmax_rescaled_img = None  # todo: modify here
+    filter = MinMaxRescaleFilter()  # todo: modify here
+    filter_params = MinMaxRescaleFilterParams(new_min_val, new_max_val)  # todo: modify here
+    minmax_rescaled_img = filter.execute(image_dict[structure.BrainImageTypes.T1w], filter_params)  # todo: modify here
+    # intensity values in MRI have on fixed scale so range from one scan to another vary --> rescacling to same intensity scale btw subjects 
+    # imp step before ML 
+
 
     return minmax_rescaled_img
 
@@ -85,8 +107,12 @@ def extract_feature_median_t1(image_dict):
             return med_img
 
     # todo: use the above filter class to get the median image feature of the T1-weighted image
-    filter = None  # todo: modify here
-    median_img = None  # todo: modify here
+    filter = MedianFilter()  # todo: modify here
+    median_img = filter.execute(image_dict[structure.BrainImageTypes.T1w])  # todo: modify here
+    # A median filter replaces each voxel with the median of the voxels in a small neighbourhood around it. 
+    # sitk.Median uses a radius of 1 by default, which means a 3×3×3 cube. 
+    # This removes noise while keeping edges, such as tissue boundaries, sharper than plain averaging would. 
+    # In the pipeline, the median-filtered T1 is used as an extra feature: a voxel classifier then sees each voxel's raw intensity plus a smoothed version of its neighbourhood.
 
     return median_img
 
